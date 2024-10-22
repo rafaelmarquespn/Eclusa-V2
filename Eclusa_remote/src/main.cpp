@@ -48,7 +48,6 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
   // Desliga o LED quando o envio termina (independente do sucesso ou falha)
   digitalWrite(ledPin, LOW);
 }
-
 // Inicializa ESP-NOW
 void setupESPNow() {
   if (esp_now_init() != ESP_OK) {

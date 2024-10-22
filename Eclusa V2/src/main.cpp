@@ -42,6 +42,10 @@ bool motor1_ok = false;
 bool motor2_ok = false;
 bool motor3_ok = false;
 bool motor4_ok = false;
+//Timer comms
+unsigned long lastCommunicationTime = 0;  // Armazena o tempo da última comunicação
+const unsigned long timeoutDuration = 1000;  // Define o tempo limite em milissegundos (5 segundos)
+
 // ESP-NOW
 typedef struct struct_message {
   bool sensorStatus[18]; // Status ON/OFF de 18 sensores
@@ -123,65 +127,78 @@ void setup() {
   // Registra callback para quando os dados são recebidos via ESP-NOW
   esp_now_register_recv_cb(OnDataRecv);
 
-  // Inicializa o LittleFS para carregar o arquivo HTML e o arquivo JSON
-  if (!LittleFS.begin()) {
-    Serial.println("Erro ao montar LittleFS");
-    return;
-  }
+  // // Inicializa o LittleFS para carregar o arquivo HTML e o arquivo JSON
+  // if (!LittleFS.begin()) {
+  //   Serial.println("Erro ao montar LittleFS");
+  //   return;
+  // }
 
-  // Carrega o arquivo index.html
-  File file = LittleFS.open("/index.html", "r");
-  if (!file) {
-    Serial.println("Erro ao abrir index.html");
-    return;
-  }
-  index_html = file.readString();
-  file.close();
+  // // Carrega o arquivo index.html
+  // File file = LittleFS.open("/index.html", "r");
+  // if (!file) {
+  //   Serial.println("Erro ao abrir index.html");
+  //   return;
+  // }
+  // index_html = file.readString();
+  // file.close();
 
-  // Carrega o arquivo de configuração JSON
-  File configFile = LittleFS.open("/config.json", "r");
-  arquivoConf = configFile.readString();
-  deserializeJson(doc, arquivoConf);
-  JsonObject configs = doc.as<JsonObject>();
+  // // Carrega o arquivo de configuração JSON
+  // File configFile = LittleFS.open("/config.json", "r");
+  // arquivoConf = configFile.readString();
+  // deserializeJson(doc, arquivoConf);
+  // JsonObject configs = doc.as<JsonObject>();
 
-  if (configs.isNull()) {
-    Serial.println("Falha ao carregar configurações");
-    return;
-  }
+  // if (configs.isNull()) {
+  //   Serial.println("Falha ao carregar configurações");
+  //   return;
+  // }
 
-  // Atualiza o SSID e a senha de acordo com o arquivo JSON
-  ssid = configs["wifiSSID"];
-  senha = configs["wifiPassword"];
-  configFile.close();
+  // // Atualiza o SSID e a senha de acordo com o arquivo JSON
+  // ssid = configs["wifiSSID"];
+  // senha = configs["wifiPassword"];
+  // configFile.close();
 
   // Inicializa Modbus
-  modbus.configureCoils(coils, 2);
-  modbus.configureDiscreteInputs(discreteInputs, 2);
-  modbus.configureHoldingRegisters(holdingRegisters, 6);
-  modbus.begin(1, 115200);
+  // modbus.configureCoils(coils, 2);
+  // modbus.configureDiscreteInputs(discreteInputs, 2);
+  // modbus.configureHoldingRegisters(holdingRegisters, 6);
+  // modbus.begin(1, 115200);
 
   // Inicializa o servidor web
-  setupServer();
-  server.begin();
+  // setupServer();
+  // server.begin();
 
-  Serial.println("Servidor iniciado");
+  // Serial.println("Servidor iniciado");
 }
 
 void loop() {
   // Se ainda não atingiu 20 tentativas
-  if (attemptCounter < 20) {
-    // Se o Wi-Fi estiver desconectado e for o momento de tentar reconectar
-    if (WiFi.status() != WL_CONNECTED && millis() - tempo > intervalo) {
-      setupWiFi();
-      tempo = millis();
-      attemptCounter++;  // Incrementa o contador de tentativas
-    }
-    Serial.println(attemptCounter);
-  }
+  // if (attemptCounter < 20) {
+  //   // Se o Wi-Fi estiver desconectado e for o momento de tentar reconectar
+  //   if (WiFi.status() != WL_CONNECTED && millis() - tempo > intervalo) {
+  //     setupWiFi();
+  //     tempo = millis();
+  //     attemptCounter++;  // Incrementa o contador de tentativas
+  //   }
+  //   Serial.println(attemptCounter);
+  // }
 
   // Processo do Modbus
-  modbus.poll();
-  holdingRegisters[2] = random(0, 100); // Atualiza um valor aleatório para teste
+  // modbus.poll();
+  // holdingRegisters[2] = random(0, 100); // Atualiza um valor aleatório para teste
+
+  // Verifica se o tempo desde a última comunicação ultrapassou o tempo limite
+  if (millis() - lastCommunicationTime > timeoutDuration) {
+    // Coloque aqui o código para setar as variáveis desejadas
+    // Exemplo:
+    motor1_ok = false;
+    motor2_ok = false;
+    motor3_ok = false;
+    motor4_ok = false;
+    
+    // Reinicia o cronômetro ou adicione lógica conforme necessário
+    lastCommunicationTime = millis();  // Para resetar o cronômetro após o timeout
+  }
 }
 
 // Função de callback para quando os dados forem recebidos via ESP-NOW
@@ -192,8 +209,13 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
   // Serial.println(macStr);
  // Verifica o status dos sensores apenas se o MAC recebido for de sensor
   if ((strcmp(macStr, sensorMac) == 0)) {
+    lastCommunicationTime = millis();
     memcpy(&receivedData, incomingData, sizeof(receivedData)); // Copia os dados recebidos para a struct
     // Verifica se o último sensor aciona o critério de parada
+    motor1_ok = true;
+    motor2_ok = true;
+    motor3_ok = true;
+    motor4_ok = true;
     // Serial.println("Status dos sensores:");
     for (int i = 0; i < 18; i++) {
       bool statusSensor = receivedData.sensorStatus[i];
@@ -201,15 +223,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
       // Definição de motor e freio associados a cada grupo de sensores
       int motorIndex = (i / 4); // 4 sensores por motor (sensores 1-4 -> motor 0, 5-8 -> motor 1, etc.)
 
-      if (statusSensor == 1) {
-        //Ativar motor correspondente
-        switch (motorIndex) {
-          case 0: motor1_ok = true; break;
-          case 1: motor2_ok = true; break;
-          case 2: motor3_ok = true; break;
-          case 3: motor4_ok = true; break;
-        }
-      } else {
+      if (statusSensor == 0) {
         // Parar motor e ativar freio correspondente
         pararMotorEFreio(motorIndex);
         Serial.println("Parando motor " + String(motorIndex) + " sensor " + String(i) + ": " + String(statusSensor) );
