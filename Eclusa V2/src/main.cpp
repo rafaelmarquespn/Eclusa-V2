@@ -4,335 +4,182 @@
 #include <ESPAsyncWebServer.h>
 #include <ModbusRTUSlave.h>
 #include <LittleFS.h>
+//#include <AsyncElegantOTA.h>
 #include <ArduinoJson.h>
 #include <AsyncJson.h>
-#include <esp_now.h>
-#include <esp_wifi.h>
-#include <string.h> 
 
-// Definições e Variáveis Globais
-#define CHANNEL 0 // Canal ESP-NOW
-#define NUM_MOTORES 4
-//MAC Address do controle remoto
-char remoteMac[18] = "E8:6B:EA:D0:C3:88";
-//MAC Address do leitor de sensores 08:D1:F9:27:B2:54
-char sensorMac[18] = "08:D1:F9:27:B2:54";
-// Wi-Fi
+
+
+
+#define CHANNEL 0 // Canal ESP-NOW para comunicação
+// Estrutura para armazenar os dados recebidos via ESP-NOW
+struct __attribute__((packed)) Message {
+  int pwm;
+  int sentido;
+};
+
+//wifi
 const char *ssid = "Moto G (5) Plus 3746";
 const char *senha = "velorio_";
 WiFiClient espClient;
 boolean conectado = false;
-unsigned long tempo = 0;
-const int intervalo = 1000; 
-int attemptCounter = 0;
-//modbus
-ModbusRTUSlave modbus(Serial2);
-uint16_t holdingRegisters[6] = {0, 0, 0, 0, 0, 0};
-bool coils[2];
-bool discreteInputs[2];
-const uint8_t coilPins[2] = {4, 5};
-const uint8_t discreteInputPins[2] = {2, 3};
-// Pinos dos motores e freios
-const int pinosMotores[NUM_MOTORES] = {23, 22, 21, 19};
-const int pinosFreios[NUM_MOTORES] = {2, 4, 5, 18};
-const int pinosSentidos[NUM_MOTORES] = {13, 12, 14, 27};
+int intervalo = 5000;
+unsigned long tempo = millis(); 
+
+const int motor1 = 23 ; 
+const int motor2 = 22; 
+const int motor3 =21 ; 
+const int motor4 = 19;
+
+const int freio1 = 2 ;
+const int freio2 = 4 ;
+const int freio3 = 5 ; 
+const int freio4 = 18 ;
+
+const int sentidoM1 = 13;
+const int sentidoM2 = 12;
+const int sentidoM3 = 14;
+const int sentidoM4 = 27;
+
 const int manta = 26;
-// Variáveis de controle dos motores
-bool motor1_ok = false;
-bool motor2_ok = false;
-bool motor3_ok = false;
-bool motor4_ok = false;
-//Timer comms
-unsigned long lastCommunicationTime = 0;  // Armazena o tempo da última comunicação
-const unsigned long timeoutDuration = 1000;  // Define o tempo limite em milissegundos (5 segundos)
 
-// ESP-NOW
-typedef struct struct_message {
-  bool sensorStatus[18]; // Status ON/OFF de 18 sensores
-} struct_message;
-
-struct_message receivedData; // Struct para armazenar os dados recebidos
-typedef struct struct_remote_control {
-  int motorID;      // ID do motor (1-4)
-  int velocidade;   // PWM para controle de velocidade (0 a 255)
-  int sentido;
-  int brake;      // Sentido do motor (0: Horário, 1: Anti-horário)
-} struct_remote_control;
-struct_remote_control remoteControl; // Struct para armazenar os dados do controle remoto
-// Arquivos e JSON
+//Arquivos
 String index_html;
 String arquivoConf;
-DynamicJsonDocument doc(1024);
-// Servidor Web
+
+//Objetos
 AsyncWebServer server(80);
-// Declaração de Funções
-void setupPinos();
-void acionaMotor(int motor, int velocidade);
+DynamicJsonDocument doc(1024);
+
+// put function declarations here:
+void setup_pinos();
+void aciona_motor(int motor, int velocidade, int sentido);
 void setupServer();
 void handleConfigJson(AsyncWebServerRequest *request);
 void saveJson();
 void setupWiFi();
 void scanWiFiNetworks(AsyncWebServerRequest *request);
 void handleWiFiStatus(AsyncWebServerRequest *request);
-void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len); // ESP-NOW callback
-void pararMotorEFreio(int motorIndex);
-void mudaSentido(int motor, int sentido);
 
 
 void setup() {
-  // Configuração dos pinos dos motores e freios
-  setupPinos();
-  
-  // Inicializa a comunicação serial
-  Serial.begin(115200);
-  Serial.println("Eclusa Atuadores V2.0");
-
-  // Configura Wi-Fi em modo Station (STA)
-  WiFi.mode(WIFI_STA);
+  setup_pinos();
+    //WiFi
   WiFi.begin(ssid, senha);
+  Serial.println(WiFi.localIP());
 
-  unsigned long startAttemptTime = millis();
-  
-  // Tentativa de conexão Wi-Fi por 10 segundos
-  while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 10000) {
-    delay(50);
-    Serial.print(".");
-  }
-
-  // Verifica se o Wi-Fi foi conectado ou não
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("Conectado ao Wi-Fi");
-    int wifiChannel = WiFi.channel();
-    Serial.print("Wi-Fi conectado no canal: ");
-    Serial.println(wifiChannel);
-    
-    // Configura o canal do ESP-NOW para o mesmo do Wi-Fi
-    esp_wifi_set_channel(wifiChannel, WIFI_SECOND_CHAN_NONE);
-    Serial.print("ESP-NOW configurado para o canal: ");
-    Serial.println(wifiChannel);
-  } else {
-    Serial.println("Wi-Fi não conectado. Configurando ESP-NOW sem Wi-Fi.");
-    
-    // Configura ESP-NOW para funcionar sem Wi-Fi (somente ESP-NOW)
-    WiFi.disconnect();  // Desconecta de qualquer tentativa de conexão Wi-Fi
-    esp_wifi_set_channel(CHANNEL, WIFI_SECOND_CHAN_NONE); // Usa um canal fixo para ESP-NOW
-  }
-
-  // Inicializa ESP-NOW
-  if (esp_now_init() != ESP_OK) {
-    Serial.println("Erro ao inicializar ESP-NOW");
+    if (!LittleFS.begin()) {
+    Serial.println("An Error has occurred while mounting LittleFS");
     return;
   }
 
-  // Registra callback para quando os dados são recebidos via ESP-NOW
-  esp_now_register_recv_cb(OnDataRecv);
+  // abre o arquivo index.html
+  File file = LittleFS.open("/index.html", "r");
+  index_html = file.readString();
+  if(!file){
+    Serial.println("Failed to open index for reading");
+    return;
+  }
+  file.close();
+  // abre o arquivo json com as configs
+  File configFile=LittleFS.open("/config.json", "r");
+  arquivoConf=configFile.readString();
+  deserializeJson(doc, arquivoConf);
+  JsonObject configs = doc.as<JsonObject>();   // converte em json o arquivo das configs
+  if (configs.isNull()) {
+    Serial.println("Falha ao carregar o arquivo de configuração");
+    return;
+  }
+  ssid = configs["wifiSSID"];   //carrega os parametros que estão no json
+  senha = configs["wifiPassword"];
+  configFile.close();
+  
+  //Server
+  setupServer();
+  server.begin();
 
-  // // Inicializa o LittleFS para carregar o arquivo HTML e o arquivo JSON
-  // if (!LittleFS.begin()) {
-  //   Serial.println("Erro ao montar LittleFS");
-  //   return;
-  // }
-
-  // // Carrega o arquivo index.html
-  // File file = LittleFS.open("/index.html", "r");
-  // if (!file) {
-  //   Serial.println("Erro ao abrir index.html");
-  //   return;
-  // }
-  // index_html = file.readString();
-  // file.close();
-
-  // // Carrega o arquivo de configuração JSON
-  // File configFile = LittleFS.open("/config.json", "r");
-  // arquivoConf = configFile.readString();
-  // deserializeJson(doc, arquivoConf);
-  // JsonObject configs = doc.as<JsonObject>();
-
-  // if (configs.isNull()) {
-  //   Serial.println("Falha ao carregar configurações");
-  //   return;
-  // }
-
-  // // Atualiza o SSID e a senha de acordo com o arquivo JSON
-  // ssid = configs["wifiSSID"];
-  // senha = configs["wifiPassword"];
-  // configFile.close();
-
-  // Inicializa Modbus
-  // modbus.configureCoils(coils, 2);
-  // modbus.configureDiscreteInputs(discreteInputs, 2);
-  // modbus.configureHoldingRegisters(holdingRegisters, 6);
-  // modbus.begin(1, 115200);
-
-  // Inicializa o servidor web
-  // setupServer();
-  // server.begin();
-
-  // Serial.println("Servidor iniciado");
-}
+  }
 
 void loop() {
-  // Se ainda não atingiu 20 tentativas
-  // if (attemptCounter < 20) {
-  //   // Se o Wi-Fi estiver desconectado e for o momento de tentar reconectar
-  //   if (WiFi.status() != WL_CONNECTED && millis() - tempo > intervalo) {
-  //     setupWiFi();
-  //     tempo = millis();
-  //     attemptCounter++;  // Incrementa o contador de tentativas
-  //   }
-  //   Serial.println(attemptCounter);
-  // }
 
-  // Processo do Modbus
-  // modbus.poll();
-  // holdingRegisters[2] = random(0, 100); // Atualiza um valor aleatório para teste
 
-  // Verifica se o tempo desde a última comunicação ultrapassou o tempo limite
-  if (millis() - lastCommunicationTime > timeoutDuration) {
-    // Coloque aqui o código para setar as variáveis desejadas
-    // Exemplo:
-    motor1_ok = false;
-    motor2_ok = false;
-    motor3_ok = false;
-    motor4_ok = false;
-    
-    // Reinicia o cronômetro ou adicione lógica conforme necessário
-    lastCommunicationTime = millis();  // Para resetar o cronômetro após o timeout
+
+  if (WiFi.status() != WL_CONNECTED && millis() - tempo > intervalo){
+    setupWiFi();
+    tempo=millis();
+  }
+
+}
+
+//Função para acionar os motores e desativar os freios
+void aciona_motor(int motor, int velocidade, int sentido){
+  switch (motor)
+  {
+  case 1:
+    digitalWrite(sentidoM1, sentido);
+    digitalWrite(freio1, HIGH);
+    ledcWrite(0, velocidade);
+    break;
+
+  case 2:
+    digitalWrite(sentidoM2, sentido);
+    digitalWrite(freio2, HIGH);
+    ledcWrite(1, velocidade);
+    break;
+  
+  case 3:
+    digitalWrite(sentidoM3, sentido);
+    digitalWrite(freio3, HIGH);
+    ledcWrite(2, velocidade);
+    break;
+  
+  case 4:
+    digitalWrite(sentidoM4, sentido);
+    digitalWrite(freio4, HIGH);
+    ledcWrite(3, velocidade);
+    break;
+  
+  default:
+    break;
   }
 }
 
-// Função de callback para quando os dados forem recebidos via ESP-NOW
-void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
-  // Serial.print("Dados recebidos de: ");
-  char macStr[18];
-  snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-  // Serial.println(macStr);
- // Verifica o status dos sensores apenas se o MAC recebido for de sensor
-  if ((strcmp(macStr, sensorMac) == 0)) {
-    lastCommunicationTime = millis();
-    memcpy(&receivedData, incomingData, sizeof(receivedData)); // Copia os dados recebidos para a struct
-    // Verifica se o último sensor aciona o critério de parada
-    motor1_ok = true;
-    motor2_ok = true;
-    motor3_ok = true;
-    motor4_ok = true;
-    // Serial.println("Status dos sensores:");
-    for (int i = 0; i < 18; i++) {
-      bool statusSensor = receivedData.sensorStatus[i];
-      // Serial.println("Sensor " + String(i) + ": " + String(statusSensor));
-      // Definição de motor e freio associados a cada grupo de sensores
-      int motorIndex = (i / 4); // 4 sensores por motor (sensores 1-4 -> motor 0, 5-8 -> motor 1, etc.)
+//Configura todos os pinos
+void setup_pinos(){
+  pinMode(motor1, OUTPUT);
+  pinMode(motor2, OUTPUT);
+  pinMode(motor3, OUTPUT);
+  pinMode(motor4, OUTPUT);
+  pinMode(freio1, OUTPUT);
+  pinMode(freio2, OUTPUT);
+  pinMode(freio3, OUTPUT);
+  pinMode(freio4, OUTPUT);
 
-      if (statusSensor == 0) {
-        // Parar motor e ativar freio correspondente
-        pararMotorEFreio(motorIndex);
-        Serial.println("Parando motor " + String(motorIndex) + " sensor " + String(i) + ": " + String(statusSensor) );
-        switch (motorIndex) {
-          case 0: motor1_ok = false; break;
-          case 1: motor2_ok = false; break;
-          case 2: motor3_ok = false; break;
-          case 3: motor4_ok = false; break;
-        }
-      }
-    }
-  }
-
-  // Verifique se o MAC é do dispositivo remoto
-  if ((strcmp(macStr, remoteMac) == 0)) {
-    // Ações específicas para o dispositivo remoto, se necessário
-    Serial.println("Dados recebidos do controle remoto");
-    memcpy(&remoteControl, incomingData, sizeof(remoteControl)); // Copia os dados recebidos para a struct
-    Serial.println(remoteControl.motorID);
-    Serial.println(remoteControl.velocidade);
-    Serial.println(remoteControl.sentido);
-    if (remoteControl.motorID >= 1 && remoteControl.motorID <= NUM_MOTORES) {
-      Serial.println("Acionando motor");
-      mudaSentido(remoteControl.motorID, remoteControl.sentido);
-      acionaMotor(remoteControl.motorID, remoteControl.velocidade);
-    if(remoteControl.brake == 1){
-      int motorIndex = remoteControl.motorID - 1;
-      pararMotorEFreio(motorIndex);
-
-    }
-    }
-  }
-}
-
-// Função para mudar o sentido dos motores
-void mudaSentido(int motor, int sentido) {
-  if (motor >= 1 && motor <= NUM_MOTORES && sentido == 0) {
-    int pino = pinosSentidos[motor - 1]; // Ajusta o índice do array
-    digitalWrite(pino, LOW);
-    Serial.println("Mudando sentido do motor " + String(motor) + " (pino " + String(pino) + ") para " + String(sentido));  
-
-  } else if (motor >= 1 && motor <= NUM_MOTORES && sentido == 1) {
-    int pino = pinosSentidos[motor -1]; // Ajusta o índice do array
-    digitalWrite(pino, HIGH);
-    Serial.println("Mudando sentido do motor " + String(motor) + " (pino " + String(pino) + ") para " + String(sentido));
-  }
-}
-
-// Função para acionar motores e freios
-void acionaMotor(int motor, int velocidade) {
-  if (motor >= 1 && motor <= NUM_MOTORES) {
-    if (motor == 1 && motor1_ok) {
-      int idx = motor - 1;
-      digitalWrite(pinosFreios[idx], HIGH);
-      ledcWrite(idx, velocidade);
-    }
-    if (motor == 2 && motor2_ok) {
-      int idx = motor - 1;
-      digitalWrite(pinosFreios[idx], HIGH);
-      ledcWrite(idx, velocidade);
-    }
-    if (motor == 3 && motor3_ok) {
-      int idx = motor - 1;
-      digitalWrite(pinosFreios[idx], HIGH);
-      ledcWrite(idx, velocidade);
-    }
-    if (motor == 4 && motor4_ok) {
-      int idx = motor - 1;
-      digitalWrite(pinosFreios[idx], HIGH);
-      ledcWrite(idx, velocidade);
-    }
-
-  }
-}
-
-// Função para parar o motor e acionar o freio
-void pararMotorEFreio(int motorIndex) {
-  ledcWrite(motorIndex, 0);
-  digitalWrite(pinosFreios[motorIndex], LOW);
-  // Serial.print("Critério de parada acionado para motor ");
-  // Serial.println(motorIndex + 1);
-}
-
-// Configura todos os pinos
-void setupPinos() {
-  for (int i = 0; i < NUM_MOTORES; i++) {
-    pinMode(pinosMotores[i], OUTPUT);
-    pinMode(pinosFreios[i], OUTPUT);
-    pinMode(pinosSentidos[i], OUTPUT);
-    ledcSetup(i, 300, 8);
-    ledcAttachPin(pinosMotores[i], i);
-    ledcWrite(i, 0);
-  }
+  pinMode(sentidoM1, OUTPUT);
+  pinMode(sentidoM2, OUTPUT);
+  pinMode(sentidoM3, OUTPUT);
+  pinMode(sentidoM4, OUTPUT);
+  
   pinMode(manta, OUTPUT);
-}
+  //Configuração do PWM
+  ledcSetup(0, 300, 8);          // Configuração do canal de PWM (0)
+  ledcAttachPin(motor1, 0);       // Vincula o canal de PWM (0) ao pino do motor
+  ledcWrite(0, 0);           // Define o PWM inicial do motor
 
-// Salva as configurações JSON
-void saveJson() {
-  File configFile = LittleFS.open("/config.json", "w");
-  StaticJsonDocument<200> doc;
-  doc["wifiSSID"] = ssid;
-  doc["wifiPassword"] = senha;
-  String json;
-  serializeJson(doc, json);
-  configFile.print(json);
-  configFile.close();
-}
+  ledcSetup(0, 300, 8);          // Configuração do canal de PWM (0)
+  ledcAttachPin(motor2, 1);       // Vincula o canal de PWM (0) ao pino do motor
+  ledcWrite(0, 0);  
 
-// Manipula a requisição para retornar as configurações em JSON
+  ledcSetup(0, 300, 8);          // Configuração do canal de PWM (0)
+  ledcAttachPin(motor3, 2);       // Vincula o canal de PWM (0) ao pino do motor
+  ledcWrite(0, 0);  
+
+  ledcSetup(0, 300, 8);          // Configuração do canal de PWM (0)
+  ledcAttachPin(motor4, 3);       // Vincula o canal de PWM (0) ao pino do motor
+  ledcWrite(0, 0);
+} 
+
+//Configuração do JSON
 void handleConfigJson(AsyncWebServerRequest *request) {
   // Cria um objeto JSON
   StaticJsonDocument<200> doc;
@@ -346,117 +193,144 @@ void handleConfigJson(AsyncWebServerRequest *request) {
   request->send(200, "application/json", json);
 }
 
-// Configuração do servidor web
-void setupServer() {
-  // Página inicial
+//Salva o JSON
+void saveJson(){
+  File configFile=LittleFS.open("/config.json", "w");
+  // Cria um objeto JSON
+  StaticJsonDocument<200> doc;
+  // Define os valores no JSON
+  doc["wifiSSID"] = ssid;
+  doc["wifiPassword"] = senha;
+  // Converte o JSON em uma string
+  String json;
+  serializeJson(doc, json);
+  configFile.print(json);
+  configFile.close();
+}
+
+//Configuração do servidor
+void setupServer(){
+      //Página de configuração
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
     request->send(LittleFS, "/index.html", "text/html");
-  });
 
-  // Configurações de Wi-Fi
+  });
   server.on("/WIFI", HTTP_GET, [](AsyncWebServerRequest *request) {
     request->send(LittleFS, "/WIFI.html", "text/html");
+
   });
+  AsyncCallbackJsonWebHandler* handler = new AsyncCallbackJsonWebHandler(
+    "/save-config", [](AsyncWebServerRequest *request, JsonVariant &json) {
+      JsonObject jsonObj = json.as<JsonObject>();
+      const char* senha = jsonObj["wifiPassword"];
+      ssid=jsonObj["wifiSSID"];
+      senha=jsonObj["wifiPassword"];
+      String mqttBrokerValue="asfjasdlfsa";
+      request->send(200, "text/plain", "Mensagem recebida:");
+      //deserializeJson(jsonObj,mqttBrokerValue);
+      saveJson();
+      setupWiFi();
+      Serial.println(WiFi.localIP());
+  });
+  server.addHandler(handler);
+  // Rota para obter configurações em JSON
+  server.on("/get", HTTP_GET, [](AsyncWebServerRequest *request) {
+    String pwm;
+    String parametro;
+    String sentido;
+    const char *oque = "input1";
+    const char *oque2 = "input2";
 
-  // Rota para salvar configurações via JSON
-  server.addHandler(new AsyncCallbackJsonWebHandler("/save-config", [](AsyncWebServerRequest *request, JsonVariant &json) {
-    JsonObject jsonObj = json.as<JsonObject>();
-    ssid = jsonObj["wifiSSID"];
-    senha = jsonObj["wifiPassword"];
-    saveJson();
-    setupWiFi();
-    request->send(200, "text/plain", "Configurações salvas");
-  }));
-
-  // Controle de motores
-  server.on("/control-motor", HTTP_GET, [](AsyncWebServerRequest *request) {
-    String motor, pwm;
-    if (request->hasParam("motor") && request->hasParam("pwm")) {
-      motor = request->getParam("motor")->value();
-      pwm = request->getParam("pwm")->value();
-      acionaMotor(motor.toInt(), pwm.toInt());
-      request->send(200, "text/plain", "Motor " + motor + " acionado com PWM " + pwm);
-    } else {
-      request->send(400, "text/plain", "Parâmetros inválidos");
+    if (request->hasParam(oque)) {
+      pwm = request->getParam(oque)->value();
+      Serial.println(pwm);
+      aciona_motor(1, pwm.toInt(), 0);
+    
+      request->send(LittleFS, "/index.html", "text/html");
+    } else if (request->hasParam(oque2)) {
+      sentido = request->getParam(oque2)->value();
+      Serial.println(sentido);
+      sentido = sentido.toInt();
+      aciona_motor(1, pwm.toInt(), sentido.toInt());
+      request->send(LittleFS, "/index.html", "text/html");
     }
   });
 
-  // Controle de relés
-  server.on("/relay", HTTP_GET, [](AsyncWebServerRequest *request) {
-    String relayNumber, action;
-    if (request->hasParam("relay") && request->hasParam("action")) {
-      relayNumber = request->getParam("relay")->value();
-      action = request->getParam("action")->value();
-      int relay = relayNumber.toInt();
-      digitalWrite(relay, (action == "ON") ? HIGH : LOW);
-      request->send(200, "text/plain", "Relé " + relayNumber + " " + action);
-    } else {
-      request->send(400, "text/plain", "Parâmetros inválidos");
-    }
-  });
-
-  // Outras rotas
+  // Rota para obter configurações em JSON
   server.on("/config.json", HTTP_GET, handleConfigJson);
+  // Rota para escanear redes Wi-Fi disponíveis
   server.on("/scan", HTTP_GET, scanWiFiNetworks);
+  // Rota para verificar o status do Wi-Fi
   server.on("/wifi-status", HTTP_GET, handleWiFiStatus);
 }
 
-// Configuração do WiFi
+//Configuração do wifi
 void setupWiFi() {
+  static unsigned long lastConnectionAttempt = 0;
+  const unsigned long connectionInterval = 10000; // Intervalo de 5 segundos entre as tentativas de conexão
+  
   if (!conectado) {
-    WiFi.softAP("PDCA_" + WiFi.macAddress(), "manut_aut");
-    if (WiFi.status() != WL_CONNECTED) {
+    //WiFi.mode();
+    WiFi.softAP("PDCA " + WiFi.macAddress(),"manut_aut");
+    //Serial.print("Conectando ao WiFi");
+    if (WiFi.status() != WL_CONNECTED && millis() - lastConnectionAttempt > connectionInterval) {
       WiFi.begin(ssid, senha);
-      // Aguarda a conexão ao Wi-Fi
-      while (WiFi.status() != WL_CONNECTED) {
-        delay(50);
-        Serial.print(".");
-      }
-      Serial.println("Conectado ao Wi-Fi");
-
-      // Obtenha o canal do Wi-Fi
-      int wifiChannel = WiFi.channel();
-      Serial.print("Wi-Fi conectado no canal: ");
-      Serial.println(wifiChannel);
-
-      // Configura o ESP-NOW para usar o mesmo canal do Wi-Fi
-      esp_wifi_set_channel(wifiChannel, WIFI_SECOND_CHAN_NONE);
-      Serial.print("ESP-NOW configurado para o canal: ");
-      Serial.println(wifiChannel);
+      lastConnectionAttempt = millis(); // Atualiza o tempo da última tentativa de conexão
     }
   } else {
     WiFi.disconnect();
     WiFi.begin(ssid, senha);
   }
+
+  // Configura um temporizador para verificar a conexão WiFi após 1 segundo
+  static unsigned long wifiCheckTimer = millis() + 1000;
+
+  // Verifica a conexão WiFi de forma assíncrona após o temporizador expirar
+  if (millis() >= wifiCheckTimer) {
+    if (WiFi.status() == WL_CONNECTED) {
+      //conectado = true;
+      //Serial.println("");
+      //Serial.println("WiFi conectado");
+      //Serial.print("Endereço IP: ");
+      //Serial.println(WiFi.localIP());
+    } else {
+      //Serial.print(".");
+    }
+    wifiCheckTimer = millis() + 1000; // Reinicia o temporizador para a próxima verificação
+  }
 }
 
-// Escaneia as redes WiFi disponíveis
+//Escaneia as redes WiFi disponíveis
 void scanWiFiNetworks(AsyncWebServerRequest *request) {
-  int n = WiFi.scanComplete();
-  if (n == -2) {
+  int n=WiFi.scanComplete();
+  if(n== -2){
     WiFi.scanNetworks(true);
-    request->send(200, "text/plain", "Nenhuma rede encontrada");
-  } else if (n) {
+    request->send(200, "text/plain", "nada");  
+  }
+  else if(n) {
     String networks = "";
     for (int i = 0; i < n; ++i) {
       networks += WiFi.SSID(i) + "\n";
     }
+    Serial.println(networks);
     WiFi.scanDelete();
     if(WiFi.scanComplete()==-2){
       WiFi.scanNetworks(true);
-      } 
+    }    
     request->send(200, "text/plain", networks);
-  } else {
-    request->send(200, "text/plain", "Nenhuma rede encontrada");
   }
+  else{
+    request->send(200, "text/plain", "nada");
+  } 
+  
 }
 
-// Verifica o status do WiFi
+//Verifica o status do WiFi
 void handleWiFiStatus(AsyncWebServerRequest *request) {
   if (WiFi.status() == WL_CONNECTED) {
-    request->send(200, "text/html", "<p style='color: green;'>Conectado ao Wi-Fi: " + String(WiFi.SSID()) + "</p>");
+    String message = "<p align='center' style='color: green;'>Conectado ao Wi-Fi: " + String(WiFi.SSID()+"</p>");
+    request->send(200, "text/html", message);
   } else {
-    request->send(200, "text/html", "<p style='color: red;'>Não conectado ao Wi-Fi.</p>");
+    request->send(200, "text/html", "<p align='center' style='color: red;'>Não conectado ao Wi-Fi.</p>");
   }
 }
-
